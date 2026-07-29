@@ -25,6 +25,7 @@ router = APIRouter(prefix="/api/predict", tags=["Prediction"])
 # ─────────────────────────────────────────────
 class ShapFactor(BaseModel):
     stage: str
+    stage_label: Optional[str] = None
     days: float
     title: str
     detailed_cause: str
@@ -35,6 +36,8 @@ class PredictionData(BaseModel):
     shap_causes: list[dict] = []        # raw dicts — schema varies per run
     detailed_analysis: Optional[str] = None
     document_warning: Optional[str] = None
+    language: Optional[str] = "en"
+    ui_labels: Optional[dict] = None
     env_scores: Optional[dict] = None
     variables: Optional[dict] = None
     chat_history: Optional[list[dict]] = None  # Added to store full conversation
@@ -95,6 +98,8 @@ async def predict_chat(request: PredictionRequest):
                 shap_causes=prediction_data_to_save.get("shap_causes", []),
                 detailed_analysis=prediction_data_to_save.get("detailed_analysis"),
                 document_warning=prediction_data_to_save.get("document_warning"),
+                language=prediction_data_to_save.get("language", "en"),
+                ui_labels=prediction_data_to_save.get("ui_labels"),
                 env_scores=prediction_data_to_save.get("env_scores"),
                 variables=prediction_data_to_save.get("variables")
             )

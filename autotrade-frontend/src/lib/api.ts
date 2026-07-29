@@ -293,9 +293,11 @@ export async function deleteRoutingHistory(routeId: number) {
 // 7. Prediction Chat — POST /api/predict/chat (JSON)
 // ─────────────────────────────────────────────
 export interface PredictionShapCause {
-  factor: string;
-  impact_days: number;
-  direction: string;
+  stage: 'Origin' | 'Transit' | 'Destination' | 'General';
+  stage_label?: string;
+  days: number;
+  title: string;
+  detailed_cause: string;
 }
 
 export interface PredictionData {
@@ -303,6 +305,9 @@ export interface PredictionData {
   shap_causes: PredictionShapCause[];
   detailed_analysis?: string | null;
   document_warning: string | null;
+  language?: string;
+  ui_labels?: Record<string, string>;
+  env_scores?: Record<string, unknown>;
   variables: {
     direction: string;
     transport_mode: string;

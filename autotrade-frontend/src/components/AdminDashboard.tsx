@@ -1,11 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { ShieldCheck, Users, BookOpen, Trash2, Upload, Loader2, Search, CheckCircle, AlertTriangle, X, FileText } from 'lucide-react';
+import { ShieldCheck, Users, Trash2, Upload, Loader2, Search, CheckCircle, AlertTriangle, X, FileText } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { API_URL } from '../lib/api';
-
-type Tab = 'users' | 'knowledge';
 
 interface UserProfile {
   id: string;
@@ -16,12 +14,6 @@ interface UserProfile {
   created_at: string;
 }
 
-interface DocumentChunk {
-  id: string;
-  document: string | null;
-  cmetadata: any;
-  collection_id: string | null;
-}
 interface RegistryDocument {
   id: string;
   document_name: string;
@@ -39,11 +31,18 @@ export type UploadStatus = 'idle' | 'uploading' | 'registering' | 'vectorizing' 
 export interface UploadData {
   filename: string;
   message?: string;
-  chunks?: number;
+}
+
+type UploadStage = 'uploading' | 'registering' | 'vectorizing' | null;
+
+interface UploadResult {
+  type: 'success' | 'error';
+  filename: string;
+  message?: string;
 }
 
 export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState<'users' | 'knowledge' | 'registry'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'registry'>('users');
 
   return (
     <div className="h-full p-8 overflow-y-auto">
@@ -55,7 +54,7 @@ export default function AdminDashboard() {
           </div>
           <div>
             <h2 className="text-2xl font-serif text-stone-800">Admin Dashboard</h2>
-            <p className="text-stone-500 text-sm mt-0.5">Manage users and knowledge base</p>
+            <p className="text-stone-500 text-sm mt-0.5">Manage users and uploaded documents</p>
           </div>
         </div>
 
@@ -72,32 +71,20 @@ export default function AdminDashboard() {
             <span>Users</span>
           </button>
           <button
-            onClick={() => setActiveTab('knowledge')}
-            className={`flex items-center space-x-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'knowledge'
-              ? 'bg-white text-stone-900 shadow-sm'
-              : 'text-stone-500 hover:text-stone-700'
-              }`}
-          >
-            <BookOpen size={16} />
-            <span>Knowledge Base (Chunks)</span>
-          </button>
-
-          <button
             onClick={() => setActiveTab('registry')}
             className={`flex items-center space-x-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'registry'
               ? 'bg-white text-stone-900 shadow-sm'
               : 'text-stone-500 hover:text-stone-700'
               }`}
           >
-            <BookOpen size={16} />
-            <span>File Manager (Registry)</span>
+            <FileText size={16} />
+            <span>File Manager</span>
           </button>
         </div>
 
         {/* Tab Content */}
         <div className="mt-6">
           {activeTab === 'users' && <UsersTab />}
-          {activeTab === 'knowledge' && <KnowledgeBaseTab />}
           {activeTab === 'registry' && <FileManager />}
         </div>
       </div>
@@ -305,159 +292,8 @@ function UsersTab() {
 }
 
 // ─────────────────────────────────────────────
-// Knowledge Base Tab
+// Legacy chunk browser removed from the Admin Dashboard.
 // ─────────────────────────────────────────────
-function KnowledgeBaseTab() {
-  const [documents, setDocuments] = useState<DocumentChunk[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-
-  useEffect(() => {
-    fetchDocuments();
-  }, []);
-
-  const fetchDocuments = async () => {
-    setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('langchain_pg_embedding')
-        .select('id, document, cmetadata, collection_id')
-        .order('id', { ascending: true })
-        .limit(100);
-
-      if (error) throw error;
-      setDocuments(data || []);
-    } catch (err) {
-      console.error('Failed to fetch documents:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-  const { user } = useAuth();
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file || !user) return;
-
-    setUploading(true);
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('user_id', user.id);
-    formData.append('document_type', 'regulation');
-
-    try {
-      const response = await fetch(`${API_URL}/admin/upload-pdf`, {
-        method: 'POST',
-        body: formData,
-      });
-      const result = await response.json();
-
-      if (result.status === 'success') {
-        fetchDocuments();
-      }
-    } catch (err) {
-      console.error('Upload failed:', err);
-    } finally {
-      setUploading(false);
-      event.target.value = '';
-    }
-  };
-  const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this document chunk?')) return;
-    try {
-      const { error } = await supabase
-        .from('langchain_pg_embedding')
-        .delete()
-        .eq('id', id);
-
-      if (error) throw error;
-      setDocuments(prev => prev.filter(d => d.id !== id));
-    } catch (err) {
-      console.error('Failed to delete document:', err);
-    }
-  };
-
-  if (loading) {
-    return <LoadingSkeleton rows={6} />;
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-stone-500">{documents.length} chunks</p>
-
-        <label className={`flex items-center space-x-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl px-4 py-2.5 text-sm font-medium transition-all shadow-sm cursor-pointer ${uploading ? 'opacity-50 cursor-wait' : ''}`}>
-          {uploading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-          <span>{uploading ? 'Vectorizing...' : 'Upload PDF'}</span>
-          <input
-            type="file"
-            accept=".pdf"
-            className="hidden"
-            onChange={handleFileUpload}
-            disabled={uploading}
-          />
-        </label>
-      </div>
-
-      {/* Document Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {documents.map((doc) => {
-          const source = doc.cmetadata?.source || 'Unknown source';
-          const page = doc.cmetadata?.page !== undefined ? `Page ${doc.cmetadata.page + 1}` : '';
-          const preview = doc.document || "No content available";
-
-          return (
-            <div
-              key={doc.id}
-              className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm hover:shadow transition-shadow group"
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center space-x-2 min-w-0">
-                  <div className="p-1.5 bg-stone-100 rounded-lg flex-shrink-0">
-                    <BookOpen size={14} className="text-stone-500" />
-                  </div>
-                  <span className="text-xs font-mono text-stone-400 truncate">
-                    {source.split('/').pop() || source}
-                  </span>
-                </div>
-                <button
-                  onClick={() => handleDelete(doc.id)}
-                  className="p-1.5 rounded-lg text-stone-300 hover:text-red-500 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
-                  title="Delete chunk"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-
-              <p className="text-sm text-stone-600 leading-relaxed line-clamp-4 mb-3">
-                {doc.document ? (doc.document?.substring(0, 180) + (doc.document.length > 180 ? '...' : '')) : preview}
-              </p>
-
-              <div className="flex items-center justify-between pt-3 border-t border-stone-100">
-                {page && (
-                  <span className="text-xs text-stone-400 bg-stone-50 px-2 py-0.5 rounded">
-                    {page}
-                  </span>
-                )}
-                <span className="text-xs text-stone-300 font-mono">
-                  {doc.id ? doc.id.substring(0, 8) : '...'}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {documents.length === 0 && (
-        <div className="text-center py-20 bg-white rounded-3xl border border-stone-200">
-          <BookOpen size={40} className="mx-auto mb-3 text-stone-300" />
-          <p className="text-stone-500 text-sm">No documents in the knowledge base</p>
-          <p className="text-stone-400 text-xs mt-1">Upload a PDF to get started</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─────────────────────────────────────────────
 // Loading Skeleton
 // ─────────────────────────────────────────────
@@ -577,12 +413,12 @@ function NotificationModal({
   result,
   onDismiss,
   onRetry,
-  onViewKnowledge,
+  onViewFiles,
 }: {
   result: UploadResult | null;
   onDismiss: () => void;
   onRetry?: () => void;
-  onViewKnowledge?: () => void;
+  onViewFiles?: () => void;
 }) {
   if (!result) return null;
 
@@ -635,28 +471,19 @@ function NotificationModal({
 
         {/* Heading */}
         <h3 className="text-xl font-semibold text-stone-900 text-center mb-2">
-          {isSuccess ? 'Document Ingested Successfully' : 'Upload Failed'}
+          {isSuccess ? 'Document Registered Successfully' : 'Upload Failed'}
         </h3>
 
         {/* Description */}
-        <p className="text-sm text-stone-500 text-center leading-relaxed mb-2">
+        <p className="text-sm text-stone-500 text-center leading-relaxed mb-6">
           {isSuccess ? (
             <>
-              <span className="font-semibold text-stone-800">{result.filename}</span> has been processed and added to the knowledge base.
+              <span className="font-semibold text-stone-800">{result.filename}</span> has been uploaded and registered in the file manager.
             </>
           ) : (
             result.message
           )}
         </p>
-
-        {/* Chunk count for success */}
-        {isSuccess && result.chunks && (
-          <div className="flex justify-center mb-6">
-            <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
-              {result.chunks} chunks stored in vector database
-            </span>
-          </div>
-        )}
 
         {/* Error filename */}
         {!isSuccess && (
@@ -677,12 +504,12 @@ function NotificationModal({
               >
                 Done
               </button>
-              {onViewKnowledge && (
+              {onViewFiles && (
                 <button
-                  onClick={onViewKnowledge}
+                  onClick={onViewFiles}
                   className="flex-1 px-4 py-3 rounded-2xl text-sm font-semibold text-white bg-amber-600 hover:bg-amber-700 transition-colors shadow-sm"
                 >
-                  View in Knowledge Base
+                  View File Manager
                 </button>
               )}
             </>
@@ -792,18 +619,16 @@ function FileManager() {
       const result = await response.json();
 
       if (result.status === 'success') {
-        const chunkMatch = result.message?.match(/(\d+)\s*chunks/);
         setUploadResult({
           type: 'success',
           filename: file.name,
           message: result.message,
-          chunks: chunkMatch ? parseInt(chunkMatch[1]) : undefined,
         });
       } else if (result.status === 'partial_success') {
         setUploadResult({
-          type: 'success',
+          type: 'error',
           filename: file.name,
-          message: 'File registered. AI processing continues in background.',
+          message: result.message || 'File registered, but AI processing failed. Please delete it and upload again.',
         });
       } else {
         setUploadResult({
@@ -911,11 +736,11 @@ function FileManager() {
         {files.length === 0 && !isVectorizing ? (
           <div className="text-center py-20 bg-white rounded-3xl border border-stone-200 shadow-sm">
             <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-stone-100 flex items-center justify-center">
-              <BookOpen size={28} className="text-stone-300" />
+              <FileText size={28} className="text-stone-300" />
             </div>
             <p className="text-stone-600 font-medium text-lg">No documents registered in the system</p>
             <p className="text-stone-400 text-sm mt-1.5 max-w-sm mx-auto">
-              Upload a PDF to add it to the compliance knowledge base. Documents will be vectorized automatically for AI retrieval.
+              Upload a PDF to register it in the file manager. BridgeAI will prepare it for AI retrieval automatically.
             </p>
           </div>
         ) : (
@@ -931,7 +756,7 @@ function FileManager() {
                 >
                   <div className="flex items-center space-x-3 bg-white/90 backdrop-blur-md border border-stone-200 rounded-2xl px-6 py-4 shadow-lg">
                     <Loader2 size={18} className="text-amber-600 animate-spin" />
-                    <p className="text-sm font-medium text-stone-700">Updating Knowledge Base... file will appear shortly.</p>
+                    <p className="text-sm font-medium text-stone-700">Updating File Manager... file will appear shortly.</p>
                   </div>
                 </motion.div>
               )}
@@ -998,7 +823,7 @@ function FileManager() {
               fetchFiles();
             }}
             onRetry={uploadResult.type === 'error' ? handleRetry : undefined}
-            onViewKnowledge={uploadResult.type === 'success' ? () => {
+            onViewFiles={uploadResult.type === 'success' ? () => {
               setUploadResult(null);
               fetchFiles();
             } : undefined}

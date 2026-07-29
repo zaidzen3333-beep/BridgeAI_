@@ -91,6 +91,7 @@ class PredictionState(TypedDict):
     # Input
     user_text: str                      # Latest user message
     conversation_history: list          # Full chat history [{"role": ..., "content": ...}]
+    language: str                       # ISO 639-1 code detected from the latest user message
 
     # Extraction
     direction: Optional[str]            # "Import" or "Export"
@@ -124,7 +125,7 @@ EXTRACTION_SYSTEM_PROMPT = """You are a JSON extractor. Your ONLY job is to outp
 
 RULES (NEVER break these):
 - Output NOTHING except the JSON object — no explanation, no prose, no markdown, no code fences.
-- Scan the ENTIRE conversation (all messages, not just the last one) for these 7 fields:
+- Scan the ENTIRE conversation (all messages, not just the last one) for these 7 shipment fields:
   1. direction   : "Import" or "Export"
   2. transport_mode : "Sea" or "Air"
   3. weight      : numeric kg value (extract number only)
@@ -132,12 +133,14 @@ RULES (NEVER break these):
   5. destination : destination city / country / port
   6. hs_code     : 4-10 digit HS code if explicitly mentioned, else null
   7. shipment_date : Date of shipment in "YYYY-MM-DD" format if mentioned, else null
+- Also detect the language of the LATEST user message and return it as an ISO 639-1 code
+  in a field named "language" (examples: "en", "fr", "ar", "es").
 - If a field was stated in any earlier message, include it. If the user updates or changes a field in the latest message, use the NEW value!
 - Use null for fields that were never mentioned anywhere in the conversation.
 - Do NOT infer or guess values that were not stated.
 
 EXACT output format (copy this structure):
-{"direction": "Import", "transport_mode": "Sea", "weight": 5000, "origin": "China", "destination": "Morocco", "hs_code": null, "shipment_date": "2026-06-01"}
+{"direction": "Import", "transport_mode": "Sea", "weight": 5000, "origin": "China", "destination": "Morocco", "hs_code": null, "shipment_date": "2026-06-01", "language": "en"}
 """
 
 MISSING_VARS_PROMPT = """You are the BridgeAI Delay Prediction Assistant. You help users predict customs clearance delays.
@@ -173,6 +176,7 @@ Rules:
 2. If they ask "why", explain the specific root causes (SHAP factors), bottlenecks, or weather conditions listed.
 3. Keep your response friendly and professional.
 4. Do NOT ask for more shipment details. The prediction is already done.
+5. Respond entirely in the SAME language as the user's follow-up question.
 """
 
 # ─────────────────────────────────────────────────────────────────────
@@ -241,6 +245,15 @@ def extraction_node(state: PredictionState) -> dict:
     destination = variables.get("destination")
     shipment_date = variables.get("shipment_date")
     hs_code = variables.get("hs_code")
+    language = str(variables.get("language") or "").strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2})?", language):
+        latest_text = state.get("user_text", "")
+        if re.search(r"[\u0600-\u06ff]", latest_text):
+            language = "ar"
+        elif re.search(r"\b(je|nous|vous|avec|pour|retard|expedition|prédiction|bonjour)\b", latest_text, re.IGNORECASE):
+            language = "fr"
+        else:
+            language = "en"
 
     missing = []
     if not direction:
@@ -271,6 +284,7 @@ def extraction_node(state: PredictionState) -> dict:
         follow_up = ask_chain.invoke(messages)
 
         return {
+            "language": language,
             "direction": direction,
             "transport_mode": transport_mode,
             "weight": float(weight) if weight else None,
@@ -285,6 +299,7 @@ def extraction_node(state: PredictionState) -> dict:
 
     # All variables present — proceed
     return {
+        "language": language,
         "direction": direction,
         "transport_mode": transport_mode,
         "weight": float(weight),
@@ -531,12 +546,24 @@ def ml_prediction_node(state: PredictionState) -> dict:
         if document_warning:
             response_message += f"\n\n**Note:** {document_warning}"
 
+        localized = _localize_prediction_output(
+            language=state.get("language", "en"),
+            response_message=response_message,
+            document_warning=document_warning,
+            shap_causes=shap_causes,
+        )
+        response_message = localized["response_message"]
+        document_warning = localized["document_warning"]
+        shap_causes = localized["shap_causes"]
+
         # ── Build rich prediction payload ──
         prediction_data = {
             "delay_days": delay_days,
             "shap_causes": shap_causes,
             "detailed_analysis": None,      # Removed — details now live in shap_causes cards
             "document_warning": document_warning,
+            "language": state.get("language", "en"),
+            "ui_labels": localized["ui_labels"],
             "env_scores": env_scores,       # Contains full weather dicts + congestion ints
             "variables": {
                 "direction": direction,
@@ -556,15 +583,134 @@ def ml_prediction_node(state: PredictionState) -> dict:
 
     except Exception as e:
         print(f"❌ [ML Prediction Node] Error: {e}")
+        error_message = (
+            f"I gathered all the information, but the ML model encountered an error: {str(e)}. "
+            "Please verify your inputs and try again."
+        )
+        localized_error = _localize_prediction_output(
+            language=state.get("language", "en"),
+            response_message=error_message,
+            document_warning=None,
+            shap_causes=[],
+        )
         return {
             "final_prediction": None,
-            "response_message": f"I gathered all the information, but the ML model encountered an error: {str(e)}. Please verify your inputs and try again.",
+            "response_message": localized_error["response_message"],
             "status": "success",
         }
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 6. SHAP Explanation Generator
+# 6. Prediction Output Localization
+# ─────────────────────────────────────────────────────────────────────
+DEFAULT_UI_LABELS = {
+    "predicted_delay": "Predicted Delay",
+    "days": "days",
+    "day_short": "d",
+    "low_risk": "Low risk — expedited clearance likely",
+    "moderate_risk": "Moderate — standard processing time",
+    "high_risk": "High risk — potential bottlenecks detected",
+    "delay_timeline": "Delay Timeline",
+    "live_weather": "Live Weather Conditions",
+    "shipment_details": "Shipment Details",
+    "document_assumption": "Document Assumption",
+    "root_cause_analysis": "Root Cause Analysis",
+    "origin": "Origin",
+    "transit": "Transit",
+    "destination": "Destination",
+    "general": "General",
+    "mode": "Mode",
+    "weight": "Weight",
+    "direction": "Direction",
+    "route": "Route",
+    "download_report": "Download Report",
+    "generating": "Generating...",
+}
+
+
+def _localize_prediction_output(
+    language: str,
+    response_message: str,
+    document_warning: Optional[str],
+    shap_causes: list,
+) -> dict:
+    """Translate user-visible prediction text without changing SHAP values or canonical stages."""
+    language = (language or "en").lower()
+    english_causes = [
+        {**cause, "stage_label": cause.get("stage", "General")}
+        for cause in shap_causes
+    ]
+    fallback = {
+        "response_message": response_message,
+        "document_warning": document_warning,
+        "shap_causes": english_causes,
+        "ui_labels": DEFAULT_UI_LABELS.copy(),
+    }
+    if language.startswith("en"):
+        return fallback
+
+    source_payload = {
+        "response_message": response_message,
+        "document_warning": document_warning,
+        "shap_causes": shap_causes,
+        "ui_labels": DEFAULT_UI_LABELS,
+    }
+    localization_prompt = f"""You localize BridgeAI prediction results.
+Translate every user-visible string in the JSON payload into the language identified by ISO code '{language}'.
+
+STRICT RULES:
+- Return one raw JSON object only. Do not use markdown fences or commentary.
+- Preserve every numeric value exactly, especially SHAP 'days'.
+- Preserve proper names, port names, HS codes and acronyms such as ADII, ONSSA, IMANOR and SHAP.
+- Preserve each canonical 'stage' value exactly as Origin, Transit, Destination or General.
+- Add 'stage_label' to every SHAP cause, translated into the target language.
+- Translate response_message, document_warning, every SHAP title and detailed_cause, and every ui_labels value.
+- Keep all JSON keys unchanged.
+
+INPUT JSON:
+{json.dumps(source_payload, ensure_ascii=False)}"""
+
+    try:
+        raw = (llm | StrOutputParser()).invoke([
+            SystemMessage(content=localization_prompt),
+            HumanMessage(content="Localize the supplied prediction JSON now."),
+        ]).strip()
+        fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw)
+        if fence_match:
+            raw = fence_match.group(1).strip()
+        localized = json.loads(raw)
+
+        translated_causes = localized.get("shap_causes", [])
+        safe_causes = []
+        for index, original in enumerate(shap_causes):
+            translated = translated_causes[index] if index < len(translated_causes) else {}
+            safe_causes.append({
+                "stage": original.get("stage", "General"),
+                "stage_label": str(translated.get("stage_label") or original.get("stage", "General")),
+                "days": original.get("days", 0),
+                "title": str(translated.get("title") or original.get("title", "")),
+                "detailed_cause": str(translated.get("detailed_cause") or original.get("detailed_cause", "")),
+            })
+
+        labels = DEFAULT_UI_LABELS.copy()
+        labels.update({
+            key: str(value)
+            for key, value in localized.get("ui_labels", {}).items()
+            if key in labels and value
+        })
+        return {
+            "response_message": str(localized.get("response_message") or response_message),
+            "document_warning": str(localized.get("document_warning") or document_warning) if document_warning else None,
+            "shap_causes": safe_causes,
+            "ui_labels": labels,
+        }
+    except Exception as exc:
+        print(f"⚠️ [Localization] Falling back to English for language={language}: {exc}")
+        return fallback
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 7. SHAP Explanation Generator
 # ─────────────────────────────────────────────────────────────────────
 def _generate_shap_explanation(model, input_df, feature_columns, state: PredictionState) -> list:
     """
@@ -847,7 +993,21 @@ def follow_up_node(state: PredictionState) -> dict:
     """
     NODE: Answer follow-up questions about an existing prediction.
     """
-    prediction = state["final_prediction"]
+    prediction = dict(state["final_prediction"])
+    requested_language = state.get("language", prediction.get("language", "en"))
+    if requested_language != prediction.get("language", "en") and prediction.get("shap_causes"):
+        relocalized = _localize_prediction_output(
+            language=requested_language,
+            response_message="The prediction is ready. Review the SHAP root causes in the dashboard.",
+            document_warning=prediction.get("document_warning"),
+            shap_causes=prediction.get("shap_causes", []),
+        )
+        prediction.update({
+            "language": requested_language,
+            "shap_causes": relocalized["shap_causes"],
+            "document_warning": relocalized["document_warning"],
+            "ui_labels": relocalized["ui_labels"],
+        })
     context_str = json.dumps(prediction, indent=2)
     messages = [
         SystemMessage(content=FOLLOW_UP_PROMPT.format(prediction_context=context_str, user_text=state["user_text"]))
@@ -940,6 +1100,7 @@ async def run_prediction_agent(conversation_history: list, user_message: str, cu
     initial_state: PredictionState = {
         "user_text": user_message,
         "conversation_history": conversation_history,
+        "language": "en",
         "direction": None,
         "transport_mode": None,
         "weight": None,

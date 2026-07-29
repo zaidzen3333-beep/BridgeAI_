@@ -40,7 +40,9 @@ export default function Risk() {
             <div className="flex-1 min-w-0">
               <div className="flex justify-between items-start mb-2">
                 <div>
-                  <h4 className="font-bold text-stone-800 text-lg">{s.screening_type}</h4>
+                  <h4 className="font-bold text-stone-800 text-lg leading-snug break-words" title={s.screening_type}>
+                    {s.screening_type}
+                  </h4>
                   <span className="text-xs text-stone-400 font-mono">
                     ID: {s.id.substring(0, 8)} • {new Date(s.created_at).toLocaleString()}
                   </span>

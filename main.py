@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from groq import Groq
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from orchestrator import stream_orchestrator
 from supabase import create_client
 from supabase_client import supabase_admin
@@ -15,6 +16,8 @@ import shutil
 import re
 from ingestion import process_pdf_to_vectors
 from vision_agent import extract_data_from_file
+from rag_agent import run_rag_agent
+from sql_agent import run_sql_agent
 from routers.prediction import router as prediction_router
 from routers.routing import router as routing_router
 import warnings
@@ -484,7 +487,9 @@ async def admin_upload_pdf(
         # STEP 3: PERFORM VECTORIZATION (Slow AI Step)
         try:
             # We pass the clean_name as the 'source' for the vector metadata
-            num_chunks = process_pdf_to_vectors(temp_path, clean_name)
+            num_chunks = await run_in_threadpool(process_pdf_to_vectors, temp_path, clean_name)
+            if num_chunks <= 0:
+                raise RuntimeError("AI extraction completed with 0 chunks.")
             
             # STEP 4: UPDATE STATUS TO COMPLETED
             supabase_admin.from_("compliance_documents").update({
@@ -505,7 +510,7 @@ async def admin_upload_pdf(
             print(f"⚠️ AI Processing failed: {vec_err}")
             return {
                 "status": "partial_success", 
-                "message": "File registered, but AI processing failed."
+                "message": f"File registered, but AI processing failed: {vec_err}"
             }
 
     except Exception as e:
@@ -642,6 +647,35 @@ async def chat_with_multiple_documents(
         
         multi_doc_context = "\n\n---\n\n".join(context_parts)
 
+        # 2.b Collect BridgeAI evidence before generation. This avoids fragile
+        # function-calling inside long document-audit prompts while keeping the
+        # answer grounded in the project data sources.
+        hs_candidates = sorted(set(re.findall(r"\b\d{4,10}\b", multi_doc_context)))[:6]
+        sql_evidence_parts = []
+        for hs_code in hs_candidates:
+            try:
+                sql_result = run_sql_agent(
+                    f"Find the hs_code, description_fr, and import_duty_rate for HS Code prefix {hs_code} in the morocco_tariffs table."
+                )
+                if isinstance(sql_result, dict) and "output" in sql_result:
+                    sql_result = sql_result["output"]
+                sql_evidence_parts.append(f"HS {hs_code}: {str(sql_result)[:1800]}")
+            except Exception as sql_err:
+                sql_evidence_parts.append(f"HS {hs_code}: BridgeAI SQL could not verify this code ({sql_err}).")
+
+        try:
+            rag_result, rag_sources = run_rag_agent(
+                f"Customs document requirements and compliance risks for this uploaded trade document. User question: {question}",
+                ""
+            )
+        except Exception as rag_err:
+            rag_result, rag_sources = f"BridgeAI legal document vectors could not verify this point ({rag_err}).", []
+
+        bridgeai_evidence = "\n\n".join([
+            "SQL database evidence:\n" + ("\n".join(sql_evidence_parts) if sql_evidence_parts else "No HS code candidate was detected in the extracted document data."),
+            "Legal document vector evidence:\n" + str(rag_result)[:4000],
+        ])
+
         # Guard against Groq TPM limits — cap document context at ~60K chars (~15K tokens)
         MAX_CONTEXT_CHARS = 60000
         truncated_warning = ""
@@ -659,10 +693,16 @@ CRITICAL OUTPUT RULES — FOLLOW EXACTLY:
 - DO NOT echo or repeat the prompt instructions back.
 - DO NOT describe what you are about to do. Just do it.
 - Jump DIRECTLY to the final polished answer with no introduction.
+- Use ONLY the extracted document data and BridgeAI database/legal-document results.
+- If a point cannot be verified from BridgeAI records, clearly say that it could not be verified.
 
 Here is the extracted data from {len(files)} uploaded document(s):
 
 {multi_doc_context}
+
+Here is the BridgeAI evidence retrieved before generation:
+
+{bridgeai_evidence}
 
 Use the following knowledge internally (do NOT repeat these rules in your answer):
 - HS CODES are strings. Cross-check them across documents.
@@ -670,10 +710,24 @@ Use the following knowledge internally (do NOT repeat these rules in your answer
 - Flag any mismatched quantities, weights, or descriptions between documents as ⚠️ compliance risks.
 - Map document descriptions to the closest 'description_fr' in the database.
 
-Your answer MUST follow this structure exactly:
-🎯 **Target Classification: [HS CODE]** (if applicable)
-Then the reasoning, duty rate, a markdown comparison table, and any ⚠️ warnings.
-If the document is not trade-related, simply provide a clear professional summary answering the user's question.
+Your answer MUST follow this structure exactly, in the same language as the user:
+
+## Diagnostic rapide
+Give a short decision: Low Risk or High Risk, and why.
+
+## Donnees extraites
+Use a clean Markdown table with the fields found in the uploaded document(s).
+
+## Verification de conformite
+Use a second Markdown table with: Controle, Resultat, Impact, Action recommandee.
+
+## Points a verifier
+List missing, uncertain, mismatched, or unverified information. If there is an anomaly, explicitly use the words "risk", "warning", and "mismatch" so the risk engine can log the screening correctly.
+
+## Source consultee
+Mention whether the answer used the extracted document, SQL database, legal document vectors, or both.
+
+If the document is not trade-related, provide a clear professional summary answering the user's question and state that no customs screening was applicable.
 
 User question: {question}{truncated_warning}"""
         # 4. Role lookup for correct history badge
@@ -682,6 +736,11 @@ User question: {question}{truncated_warning}"""
 
         # 5. SAVE USER MESSAGE with file manifest
         filenames = ", ".join([f.filename for f in files])
+        audit_title = (
+            f"Audit document : {files[0].filename}"
+            if len(files) == 1
+            else f"Audit documents : {filenames}"
+        )
         save_message(session_id, actual_role, f"📑 [Attached {len(files)} files: {filenames}] {question}")
      
         # 6. Fetch history context
@@ -690,18 +749,49 @@ User question: {question}{truncated_warning}"""
 
         async def stream_and_persist():
             full_ai_answer = ""
-            
-            async for chunk in stream_orchestrator(context_prompt, recent_context):
-                if "data: " in chunk:
-                    for line in chunk.split('\n'):
-                        if line.startswith("data: "):
-                            try:
-                                data = json.loads(line[6:])
-                                if data.get("type") == "token":
-                                    full_ai_answer += data.get("content", "")
-                            except:
-                                pass
-                yield chunk
+
+            try:
+                yield f"data: {json.dumps({'type': 'status', 'content': 'Analyse documentaire et verification BridgeAI en cours...'})}\n\n"
+
+                stream = groq_client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    temperature=0,
+                    stream=True,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are BridgeAI's document compliance auditor. "
+                                "Do not call tools. Use only the extracted document data and the provided BridgeAI SQL/RAG evidence. "
+                                "Answer in the same language as the user. Use clear Markdown headings and tables. "
+                                "Never expose raw technical errors; say that BridgeAI could not verify a point when evidence is missing."
+                            ),
+                        },
+                        {"role": "user", "content": context_prompt},
+                    ],
+                )
+
+                for event in stream:
+                    delta = event.choices[0].delta.content or ""
+                    if not delta:
+                        continue
+                    full_ai_answer += delta
+                    yield f"data: {json.dumps({'type': 'token', 'content': delta})}\n\n"
+
+                final_sources = ["Extracted uploaded document", "Enterprise SQL Database", "Legal Document Vectors"]
+                if rag_sources:
+                    final_sources.extend([str(src) for src in rag_sources[:3]])
+                yield f"data: {json.dumps({'type': 'done', 'sources': final_sources, 'agents': 'Document Compliance Auditor'})}\n\n"
+
+            except Exception as generation_err:
+                fallback_answer = (
+                    "BridgeAI n'a pas pu finaliser l'analyse automatique de ce document pour le moment. "
+                    "Les donnees ont ete extraites, mais la generation de l'audit a echoue. "
+                    "Veuillez relancer l'analyse ou verifier le format du document."
+                )
+                full_ai_answer = fallback_answer
+                yield f"data: {json.dumps({'type': 'token', 'content': fallback_answer})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'sources': ['Extracted uploaded document'], 'agents': 'Document Compliance Auditor'})}\n\n"
 
             # 7. Final Persistence
             if full_ai_answer.strip():
@@ -719,7 +809,7 @@ User question: {question}{truncated_warning}"""
                     supabase_admin.from_("compliance_screenings").insert({
                         "user_id": profile_id,
                         "session_id": session_id,
-                        "screening_type": f"Multi-Doc Audit ({len(files)} files)",
+                        "screening_type": audit_title,
                         "status": status,
                         "ai_analysis_notes": full_ai_answer[:1200]
                     }).execute()

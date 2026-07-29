@@ -55,7 +55,7 @@ export default function Assistant() {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [statusText, setStatusText] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // ── Image-upload state ──
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -125,6 +125,19 @@ export default function Assistant() {
       loadHistory(currentSessionId);
     }
   }, [isLoggedIn, realUser, currentSessionId, paramSessionId]);
+
+  const resizeInput = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+
+    el.style.height = '0px';
+    const nextHeight = Math.min(el.scrollHeight, 176);
+    el.style.height = `${Math.max(nextHeight, 24)}px`;
+  }, []);
+
+  useEffect(() => {
+    resizeInput();
+  }, [input, resizeInput]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -462,7 +475,7 @@ export default function Assistant() {
                             {getRoleBadge('ai')}
                           </div>
 
-                          <div className="prose prose-lg prose-stone max-w-none text-stone-800 text-lg leading-[1.75]">
+                          <div className="ai-markdown prose prose-lg prose-stone max-w-none text-stone-800 text-lg leading-[1.75]">
                             {/* Status badge — shown while agents are working */}
                             {msg.statusText && (
                               <div className="mb-3 inline-flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 animate-pulse">
@@ -553,10 +566,10 @@ export default function Assistant() {
           )}
 
           {/* ── Input row ── */}
-          <div className="relative flex items-center group">
+          <div className="relative flex items-end group bg-white border border-stone-200 rounded-[28px] shadow-sm transition-all focus-within:ring-2 focus-within:ring-stone-200 focus-within:border-transparent">
 
             {!isLoggedIn && (
-              <div className="absolute inset-0 bg-stone-100/60 backdrop-blur-[2px] rounded-full z-20 flex items-center justify-center cursor-not-allowed">
+              <div className="absolute inset-0 bg-stone-100/60 backdrop-blur-[2px] rounded-[28px] z-20 flex items-center justify-center cursor-not-allowed">
                 <span className="text-sm font-medium text-stone-600 flex items-center gap-2">
                   <Lock size={14} /> Sign In to Chat
                 </span>
@@ -577,7 +590,7 @@ export default function Assistant() {
             <button
               onClick={toggleRecording}
               disabled={!isLoggedIn || isTranscribing}
-              className="absolute left-3 w-10 h-10 flex items-center justify-center text-stone-400 hover:text-amber-600 transition-colors z-10 disabled:opacity-50"
+              className="absolute bottom-2 left-3 w-10 h-10 flex items-center justify-center text-stone-400 hover:text-amber-600 transition-colors z-10 disabled:opacity-50"
             >
               {isRecording ? <StopCircle size={20} className="text-red-500 animate-pulse" /> : <Mic size={20} />}
             </button>
@@ -587,7 +600,7 @@ export default function Assistant() {
               onClick={() => fileInputRef.current?.click()}
               disabled={!isLoggedIn || loading || isTranscribing}
               title="Attach invoice image"
-              className={`absolute left-14 w-8 h-8 flex items-center justify-center rounded-full transition-colors z-10 disabled:opacity-50
+              className={`absolute bottom-3 left-14 w-8 h-8 flex items-center justify-center rounded-full transition-colors z-10 disabled:opacity-50
                 ${selectedFile
                   ? 'text-amber-600 bg-amber-50 hover:bg-amber-100'
                   : 'text-stone-400 hover:text-amber-600'
@@ -597,12 +610,17 @@ export default function Assistant() {
             </button>
 
             {/* Text input — left padding widened to accommodate both left buttons */}
-            <input
+            <textarea
               ref={inputRef}
-              type="text"
+              rows={1}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
               disabled={loading || !isLoggedIn || isTranscribing}
               placeholder={
                 isTranscribing
@@ -613,14 +631,14 @@ export default function Assistant() {
                       ? 'Ask about this invoice...'
                       : 'Reply to BridgeAI...'
               }
-              className="w-full bg-white border border-stone-200 rounded-full py-4 pl-24 pr-14 shadow-sm focus:outline-none focus:ring-2 focus:ring-stone-200 focus:border-transparent transition-all placeholder:text-stone-400 text-stone-800 disabled:opacity-50"
+              className="max-h-44 min-h-14 w-full resize-none overflow-y-auto bg-transparent py-4 pl-24 pr-14 text-stone-800 placeholder:text-stone-400 leading-6 focus:outline-none disabled:opacity-50 scrollbar-thin"
             />
 
             {/* Send button */}
             <button
               onClick={handleSend}
               disabled={!input.trim() || loading || !isLoggedIn}
-              className="absolute right-3 w-10 h-10 bg-stone-800 rounded-full flex items-center justify-center text-white hover:bg-stone-700 transition-colors disabled:opacity-50 z-10"
+              className="absolute bottom-2 right-3 w-10 h-10 bg-stone-800 rounded-full flex items-center justify-center text-white hover:bg-stone-700 transition-colors disabled:opacity-50 z-10"
             >
               <ArrowUp size={18} />
             </button>

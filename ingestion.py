@@ -7,11 +7,11 @@ from rag_agent import get_write_db
 
 load_dotenv()
 
-# Initialize Llama-parse
-parser = LlamaParse(
-    result_type="markdown",
-    num_workers=4
-)
+def _build_parser() -> LlamaParse:
+    return LlamaParse(
+        result_type="markdown",
+        num_workers=1
+    )
 
 # --- REMOVED 'async' ---
 def process_pdf_to_vectors(file_path: str, filename: str):
@@ -23,11 +23,12 @@ def process_pdf_to_vectors(file_path: str, filename: str):
         print(f"📄 AI starting to read (Sync Mode): {filename}...")
         
         # --- USE 'load_data' (Synchronous) ---
+        parser = _build_parser()
         llama_docs = parser.load_data(file_path)
         
         if not llama_docs:
             print("❌ Llama-Parse returned no content.")
-            return 0
+            raise RuntimeError("Llama-Parse returned no content.")
             
         full_text = ""
         for doc in llama_docs:
@@ -42,7 +43,7 @@ def process_pdf_to_vectors(file_path: str, filename: str):
 
         if not chunks:
             print("⚠️ No chunks created.")
-            return 0
+            raise RuntimeError("No chunks were created from the parsed PDF content.")
 
         batch_id = str(uuid.uuid4())
         metadatas = []
@@ -62,4 +63,4 @@ def process_pdf_to_vectors(file_path: str, filename: str):
 
     except Exception as e:
         print(f"❌ Ingestion Logic Error: {e}")
-        return 0
+        raise RuntimeError(str(e)) from e

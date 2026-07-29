@@ -35,6 +35,7 @@ interface WeatherData {
 
 interface ShapCause {
   stage: 'Origin' | 'Transit' | 'Destination' | 'General';
+  stage_label?: string;
   days: number;
   title: string;
   detailed_cause: string;
@@ -45,6 +46,8 @@ interface PredictionResult {
   shap_causes: ShapCause[];
   detailed_analysis?: string | null;
   document_warning: string | null;
+  language?: string;
+  ui_labels?: Record<string, string>;
   env_scores?: {
     origin_weather_data?: WeatherData;
     destination_weather_data?: WeatherData;
@@ -135,7 +138,13 @@ function WeatherCard({ label, data, congestion }: {
   );
 }
 
-function TimelineNode({ stage, days, active }: { stage: string; days: number; active: boolean }) {
+function TimelineNode({ stage, displayStage, days, active, dayShort }: {
+  stage: string;
+  displayStage?: string;
+  days: number;
+  active: boolean;
+  dayShort?: string;
+}) {
   const s = STAGE_STYLES[stage] ?? STAGE_STYLES.General;
   return (
     <div className="flex flex-col items-center gap-1">
@@ -150,8 +159,8 @@ function TimelineNode({ stage, days, active }: { stage: string; days: number; ac
         {stage === 'Destination' && <MapPin size={16} className={active ? 'text-white' : 'text-stone-400'} />}
         {stage === 'General' && <Package size={14} className={active ? 'text-white' : 'text-stone-400'} />}
       </div>
-      <p className={`text-[10px] font-semibold ${active ? s.text : 'text-stone-400'}`}>{stage}</p>
-      {days > 0 && <p className={`text-[10px] font-mono ${active ? s.text : 'text-stone-400'}`}>+{days}d</p>}
+      <p className={`text-[10px] font-semibold ${active ? s.text : 'text-stone-400'}`}>{displayStage || stage}</p>
+      {days > 0 && <p className={`text-[10px] font-mono ${active ? s.text : 'text-stone-400'}`}>+{days}{dayShort || 'd'}</p>}
     </div>
   );
 }
@@ -401,7 +410,7 @@ export default function Prediction() {
       // D  — DOCUMENT ASSUMPTION NOTICE
       // ──────────────────────────────────────────────────
       if (prediction.document_warning) {
-        section('Regulatory Document Notice');
+        section(label('document_assumption', 'Document Assumption'));
         newPage(20);
         fc('#fffbeb'); dc('#fcd34d'); pdf.setLineWidth(0.4);
         const dwLines = pdf.splitTextToSize(prediction.document_warning, cw - 10) as string[];
@@ -434,7 +443,7 @@ export default function Prediction() {
           days: grouped[s].reduce((a,c)=>a+c.days,0),
         })).filter(s=>s.days>0);
 
-        section('Delay Stage Breakdown');
+        section(label('delay_timeline', 'Delay Timeline'));
         newPage(12 + stageTotals.length * 10);
 
         // Horizontal stacked bar showing proportion of delay per stage
@@ -447,7 +456,7 @@ export default function Prediction() {
           fc(bg); dc(bg); pdf.rect(barX2, y, bw, 8, 'FD');
           if (bw > 20) {
             tc(tx); B(7);
-            pdf.text(`${stage} +${days}d`, barX2 + bw/2, y + 5.5, { align: 'center' });
+            pdf.text(`${stageLabel(stage)} +${days}${label('day_short', 'd')}`, barX2 + bw/2, y + 5.5, { align: 'center' });
           }
           barX2 += bw;
         });
@@ -460,9 +469,9 @@ export default function Prediction() {
           fc(bg); dc(bg);
           pdf.roundedRect(mg, y, 28, 6, 1, 1, 'F');
           tc(tx); B(7);
-          pdf.text(stage.toUpperCase(), mg + 14, y + 4.5, { align: 'center' });
+          pdf.text(stageLabel(stage).toUpperCase(), mg + 14, y + 4.5, { align: 'center' });
           tc('#111827'); N(8);
-          pdf.text(`Total: +${days.toFixed(1)} days`, mg + 32, y + 4.5);
+          pdf.text(`+${days.toFixed(1)} ${label('days', 'days')}`, mg + 32, y + 4.5);
           y += 8;
         });
         y += 4;
@@ -470,7 +479,7 @@ export default function Prediction() {
         // ──────────────────────────────────────────────────
         // F  — ROOT CAUSE ANALYSIS CARDS
         // ──────────────────────────────────────────────────
-        section('Root Cause Analysis');
+        section(label('root_cause_analysis', 'Root Cause Analysis'));
 
         prediction.shap_causes.forEach((cause, idx) => {
           const [bg, tx] = stageColors2[cause.stage] ?? ['#f3f4f6','#374151'];
@@ -487,14 +496,14 @@ export default function Prediction() {
           // Stage pill
           fc(bg); pdf.roundedRect(mg + 7, y + 3, 24, 5.5, 1, 1, 'F');
           tc(tx); B(6.5);
-          pdf.text(cause.stage.toUpperCase(), mg + 19, y + 7, { align: 'center' });
+          pdf.text((cause.stage_label || stageLabel(cause.stage)).toUpperCase(), mg + 19, y + 7, { align: 'center' });
 
           // Title
           tc('#111827'); B(8.5);
           pdf.text(cause.title, mg + 35, y + 7);
 
           // Days badge (right side)
-          const daysTxt = `+${cause.days.toFixed(1)}d`;
+          const daysTxt = `+${cause.days.toFixed(1)}${label('day_short', 'd')}`;
           fc(tx); pdf.roundedRect(W - mg - 20, y + 2, 18, 7, 1, 1, 'F');
           tc('#ffffff'); B(8);
           pdf.text(daysTxt, W - mg - 11, y + 7, { align: 'center' });
@@ -638,6 +647,9 @@ export default function Prediction() {
   const env = prediction?.env_scores ?? {};
   const originWeatherData = env.origin_weather_data as WeatherData | undefined;
   const destWeatherData = env.destination_weather_data as WeatherData | undefined;
+  const uiLabels = prediction?.ui_labels ?? {};
+  const label = (key: string, fallback: string) => uiLabels[key] || fallback;
+  const stageLabel = (stage: string) => label(stage.toLowerCase(), stage);
 
   return (
     <div ref={containerRef} className="flex h-full w-full overflow-hidden relative">
@@ -867,8 +879,8 @@ export default function Prediction() {
                 className="flex items-center gap-2 text-xs px-3 py-1.5 bg-stone-800 hover:bg-stone-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-stone-50 transition-colors shadow-sm"
               >
                 {downloading
-                  ? <><Loader2 size={13} className="animate-spin" /><span>Generating...</span></>
-                  : <><Download size={13} /><span>Download Report</span></>
+                  ? <><Loader2 size={13} className="animate-spin" /><span>{label('generating', 'Generating...')}</span></>
+                  : <><Download size={13} /><span>{label('download_report', 'Download Report')}</span></>
                 }
               </button>
             </div>
@@ -876,12 +888,12 @@ export default function Prediction() {
             {/* ── Predicted Delay Card ── */}
             <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider">Predicted Delay</h3>
+                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider">{label('predicted_delay', 'Predicted Delay')}</h3>
                 <Clock size={16} className="text-amber-500" />
               </div>
               <div className="flex items-end gap-2 mb-3">
                 <span className="text-4xl font-bold text-stone-800">{prediction.delay_days}</span>
-                <span className="text-lg text-stone-400 pb-1">days</span>
+                <span className="text-lg text-stone-400 pb-1">{label('days', 'days')}</span>
               </div>
               <div className="h-2 bg-stone-100 rounded-full overflow-hidden mb-2">
                 <div
@@ -892,16 +904,16 @@ export default function Prediction() {
                 />
               </div>
               <p className="text-xs text-stone-400">
-                {prediction.delay_days <= 3 ? 'Low risk — expedited clearance likely'
-                  : prediction.delay_days <= 7 ? 'Moderate — standard processing time'
-                  : 'High risk — potential bottlenecks detected'}
+                {prediction.delay_days <= 3 ? label('low_risk', 'Low risk — expedited clearance likely')
+                  : prediction.delay_days <= 7 ? label('moderate_risk', 'Moderate — standard processing time')
+                  : label('high_risk', 'High risk — potential bottlenecks detected')}
               </p>
             </div>
 
             {/* ── Visual Timeline ── */}
             {stageGroups && (
               <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-4">Delay Timeline</h3>
+                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-4">{label('delay_timeline', 'Delay Timeline')}</h3>
                 <div className="flex items-center justify-between relative">
                   {/* Connector line */}
                   <div className="absolute top-5 left-5 right-5 h-0.5 bg-stone-200 z-0" />
@@ -909,8 +921,10 @@ export default function Prediction() {
                     <div key={stage} className="z-10">
                       <TimelineNode
                         stage={stage}
+                        displayStage={stageLabel(stage)}
                         days={stageGroups[stage]?.total ?? 0}
                         active={(stageGroups[stage]?.total ?? 0) > 0}
+                        dayShort={label('day_short', 'd')}
                       />
                     </div>
                   ))}
@@ -924,11 +938,11 @@ export default function Prediction() {
                     const pct = Math.min((total / prediction.delay_days) * 100, 100);
                     return (
                       <div key={stage} className="flex items-center gap-2">
-                        <span className={`text-[10px] font-semibold w-20 ${s.text}`}>{stage}</span>
+                        <span className={`text-[10px] font-semibold w-20 ${s.text}`}>{stageLabel(stage)}</span>
                         <div className="flex-1 h-1.5 bg-stone-100 rounded-full overflow-hidden">
                           <div className={`h-full rounded-full ${s.dot}`} style={{ width: `${pct}%` }} />
                         </div>
-                        <span className={`text-[10px] font-mono font-bold w-8 text-right ${s.text}`}>+{total}d</span>
+                        <span className={`text-[10px] font-mono font-bold w-8 text-right ${s.text}`}>+{total}{label('day_short', 'd')}</span>
                       </div>
                     );
                   })}
@@ -939,7 +953,7 @@ export default function Prediction() {
             {/* ── Weather Widget ── */}
             {(originWeatherData || destWeatherData) && prediction.variables && (
               <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-3">Live Weather Conditions</h3>
+                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-3">{label('live_weather', 'Live Weather Conditions')}</h3>
                 <div className="grid grid-cols-2 gap-3">
                   <WeatherCard
                     label={prediction.variables.origin}
@@ -958,12 +972,12 @@ export default function Prediction() {
             {/* ── Shipment Details ── */}
             {prediction.variables && (
               <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-3">Shipment Details</h3>
+                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider mb-3">{label('shipment_details', 'Shipment Details')}</h3>
                 <div className="grid grid-cols-2 gap-2.5">
-                  <InfoPill icon={prediction.variables.transport_mode === 'Sea' ? Anchor : Plane} label="Mode" value={prediction.variables.transport_mode} />
-                  <InfoPill icon={Package} label="Weight" value={`${prediction.variables.weight} kg`} />
-                  <InfoPill icon={TrendingUp} label="Direction" value={prediction.variables.direction} />
-                  <InfoPill icon={MapPin} label="Route" value={`${prediction.variables.origin} → ${prediction.variables.destination}`} />
+                  <InfoPill icon={prediction.variables.transport_mode === 'Sea' ? Anchor : Plane} label={label('mode', 'Mode')} value={prediction.variables.transport_mode} />
+                  <InfoPill icon={Package} label={label('weight', 'Weight')} value={`${prediction.variables.weight} kg`} />
+                  <InfoPill icon={TrendingUp} label={label('direction', 'Direction')} value={prediction.variables.direction} />
+                  <InfoPill icon={MapPin} label={label('route', 'Route')} value={`${prediction.variables.origin} → ${prediction.variables.destination}`} />
                 </div>
               </div>
             )}
@@ -973,7 +987,7 @@ export default function Prediction() {
               <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex gap-3">
                 <AlertTriangle size={16} className="text-amber-600 flex-shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="text-sm font-semibold text-amber-800 mb-1">Document Assumption</h4>
+                  <h4 className="text-sm font-semibold text-amber-800 mb-1">{label('document_assumption', 'Document Assumption')}</h4>
                   <p className="text-xs text-amber-700 leading-relaxed">{prediction.document_warning}</p>
                 </div>
               </div>
@@ -982,7 +996,7 @@ export default function Prediction() {
             {/* ── Root Cause Cards ── */}
             {prediction.shap_causes.length > 0 && (
               <div className="space-y-3">
-                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider px-1">Root Cause Analysis</h3>
+                <h3 className="text-xs font-semibold text-stone-400 uppercase tracking-wider px-1">{label('root_cause_analysis', 'Root Cause Analysis')}</h3>
                 {prediction.shap_causes.map((cause, i) => {
                   const s = STAGE_STYLES[cause.stage] ?? STAGE_STYLES.General;
                   return (
@@ -990,12 +1004,12 @@ export default function Prediction() {
                       <div className="flex items-start justify-between gap-3 mb-2">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${s.badge}`}>
-                            {cause.stage}
+                            {cause.stage_label || stageLabel(cause.stage)}
                           </span>
                           <h4 className={`text-sm font-semibold ${s.text}`}>{cause.title}</h4>
                         </div>
                         <span className={`text-sm font-bold font-mono flex-shrink-0 ${s.text}`}>
-                          +{cause.days}d
+                          +{cause.days}{label('day_short', 'd')}
                         </span>
                       </div>
                       <p className="text-xs text-stone-600 leading-relaxed">{cause.detailed_cause}</p>
